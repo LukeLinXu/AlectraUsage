@@ -7,4 +7,6 @@ dist/
 build/
 # local captures from the login spike / debugging
 captures/
+# generated analysis reports
+data/
 usage_*.json

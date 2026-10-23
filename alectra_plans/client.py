@@ -160,6 +160,26 @@ class AlectraSession:
     def captured_urls(self) -> list[str]:
         return [c["url"] for c in self._captured]
 
+    async def attach_recorder(self) -> None:
+        """Start recording the portal's own API traffic (for mining later)."""
+        self._captured.clear()
+        self.page.on("response", self._record_response)
+
+    async def wait_for_manual_login(self, timeout_s: float = 300.0) -> bool:
+        """Poll localStorage until the user finishes logging in the visible page.
+
+        Returns True and stores the tokens on success. The password is typed
+        by the user into the real portal — it never passes through code.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while asyncio.get_running_loop().time() < deadline:
+            token = await self._token_from_localstorage()
+            if token:
+                self._set_tokens(token, {})
+                return True
+            await asyncio.sleep(2)
+        return False
+
     async def submit_tfa(self, code: str) -> None:
         """Enter the one-time code in the portal UI and wait for the token."""
         if not self.page:
@@ -406,21 +426,41 @@ class AlectraSession:
         *,
         on_month_done=None,
         cache=None,
+        month_timeout_s: float = 90.0,
     ) -> list[dict]:
-        """Fetch months from ``start`` to ``end`` inclusive, with cache."""
+        """Fetch months from ``start`` to ``end`` inclusive, with cache.
+
+        Each month is hard-capped at ``month_timeout_s`` at the Python level
+        (on top of the in-page fetch abort) so a wedged request can never
+        stall a whole run silently.
+        """
         entries: list[dict] = []
         months = _months_between(start, end)
         for i, (year, month) in enumerate(months):
             key = f"{year:04d}-{month:02d}"
             if cache and (cached := cache.load(account_number, meter_number, key)):
                 entries.extend(cached)
-            else:
-                data = await self.fetch_month(account_number, meter_number, year, month)
-                if cache:
-                    cache.store(account_number, meter_number, key, data)
-                entries.extend(data)
+                if on_month_done:
+                    await _maybe_await(on_month_done(i + 1, len(months), key, len(cached), 0.0, True))
+                continue
+            t0 = asyncio.get_running_loop().time()
+            try:
+                data = await asyncio.wait_for(
+                    self.fetch_month(account_number, meter_number, year, month),
+                    timeout=month_timeout_s,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AlectraError(
+                    f"Fetching {key} exceeded {month_timeout_s:.0f}s; aborted."
+                ) from exc
+            elapsed = asyncio.get_running_loop().time() - t0
+            if cache:
+                cache.store(account_number, meter_number, key, data)
+            entries.extend(data)
             if on_month_done:
-                await _maybe_await(on_month_done(i + 1, len(months), key))
+                await _maybe_await(
+                    on_month_done(i + 1, len(months), key, len(data), elapsed, False)
+                )
         return entries
 
 
