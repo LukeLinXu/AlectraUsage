@@ -81,6 +81,8 @@ class AlectraSession:
     last_login_response: dict = field(default_factory=dict)
     _captured: list[dict] = field(default_factory=list)  # SPA's own API traffic
     _recorder_attached: bool = False
+    _token_candidates: list[str] = field(default_factory=list)
+    _token_validated: bool = False
 
     async def __aenter__(self) -> "AlectraSession":
         self._pw = await async_playwright().start()
@@ -176,9 +178,12 @@ class AlectraSession:
         """
         deadline = asyncio.get_running_loop().time() + timeout_s
         while asyncio.get_running_loop().time() < deadline:
-            token = await self._token_from_localstorage()
-            if token:
-                self._set_tokens(token, {})
+            raw = await self.page.evaluate("() => localStorage.getItem('tokenKey')")
+            candidates = _collect_token_candidates(str(raw)) if raw else []
+            if candidates:
+                self._set_tokens(candidates[0], {})
+                self._token_candidates = candidates
+                await self._ensure_working_token()
                 return True
             await asyncio.sleep(2)
         return False
@@ -215,6 +220,7 @@ class AlectraSession:
             if token:
                 self._set_tokens(token, {})
                 self.tfa_pending = False
+                await self._ensure_working_token()
                 await self.page.wait_for_timeout(5000)  # dashboard calls -> _captured
                 return
             await asyncio.sleep(1)
@@ -249,6 +255,40 @@ class AlectraSession:
         if isinstance(data, dict):
             self.refresh_token = data.get("refreshToken")
         self.token_expiry = _jwt_expiry(token)
+        self._token_validated = False
+        # The login response carries accessToken AND refreshToken, both JWTs;
+        # field order in the JSON decides which one a naive regex grabs, so
+        # keep every candidate and let _ensure_working_token pick the real one.
+        self._token_candidates = _collect_token_candidates(body)
+        if token not in self._token_candidates:
+            self._token_candidates.insert(0, token)
+
+    async def _ensure_working_token(self) -> None:
+        """Validate a token against an authed endpoint; swap until one works."""
+        if self._token_validated and self.access_token:
+            return
+        last_error: Exception | None = None
+        for candidate in self._token_candidates:
+            uuid_claim = _uuid_from_token(candidate)
+            if not uuid_claim:
+                continue
+            self.access_token = candidate
+            self.token_expiry = _jwt_expiry(candidate)
+            try:
+                await self.api(
+                    "GET",
+                    f"/AccountManagementAPI/api/1/Addresses/User/{uuid_claim}",
+                    timeout_s=15,
+                )
+                self._token_validated = True
+                return
+            except AlectraError as exc:
+                last_error = exc
+        self.access_token = None
+        raise AlectraError(
+            f"None of the {len(self._token_candidates)} tokens from the login "
+            f"response were accepted: {last_error}"
+        )
 
     async def _token_from_localstorage(self) -> str | None:
         raw = await self.page.evaluate("() => localStorage.getItem('tokenKey')")
@@ -295,26 +335,34 @@ class AlectraSession:
         try:
             result = await self.page.evaluate(
                 """async ({method, url, body, token, timeoutMs}) => {
-                    const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-                    try {
-                        const resp = await fetch(url, {
-                            method,
-                            headers: {
-                                'accept': 'application/json, text/plain, */*',
-                                'authorization': 'Bearer ' + token,
-                                'pt': '1',
-                                'uid': '1',
-                            },
-                            body: body === null || body === undefined ? undefined : JSON.stringify(body),
-                            credentials: 'include',
-                            signal: ctrl.signal,
-                        });
-                        const text = await resp.text();
-                        return {status: resp.status, body: text};
-                    } finally {
-                        clearTimeout(timer);
-                    }
+                    return await new Promise((resolve) => {
+                        const xhr = new XMLHttpRequest();
+                        let settled = false;
+                        const finish = (r) => {
+                            if (!settled) { settled = true; clearTimeout(timer); resolve(r); }
+                        };
+                        const timer = setTimeout(
+                            () => { xhr.abort(); finish({status: 0, body: 'CLIENT_ABORT'}); },
+                            timeoutMs,
+                        );
+                        try {
+                            // XHR, not fetch: fetch() hangs behind Cloudflare on this
+                            // host while XHR (what the portal's axios uses) responds.
+                            // No withCredentials: the API is bearer-token-only and the
+                            // server sends no Access-Control-Allow-Credentials, so
+                            // credentialed requests are rejected pre-flight.
+                            xhr.open(method, url, true);
+                            xhr.setRequestHeader('accept', 'application/json, text/plain, */*');
+                            if (token) xhr.setRequestHeader('authorization', 'Bearer ' + token);
+                            xhr.setRequestHeader('pt', '1');
+                            xhr.setRequestHeader('uid', '1');
+                            xhr.timeout = timeoutMs;
+                            xhr.onload = () => finish({status: xhr.status, body: xhr.responseText});
+                            xhr.onerror = () => finish({status: 0, body: 'XHR_ERROR'});
+                            xhr.ontimeout = () => finish({status: 0, body: 'XHR_TIMEOUT'});
+                            xhr.send(body === undefined || body === null ? null : JSON.stringify(body));
+                        } catch (e) { finish({status: 0, body: 'XHR_EXC:' + e}); }
+                    });
                 }""",
                 {
                     "method": method,
@@ -329,6 +377,10 @@ class AlectraSession:
                 f"Request to {path} failed or timed out after {timeout_s:.0f}s. "
                 "If this repeats, restart and log in with 'show browser' enabled."
             ) from exc
+        if result["status"] == 0:
+            # transport-level failure (CORS/network/abort) — never swallow it:
+            # an empty result would look like "no data for this month"
+            raise AlectraError(f"Request to {path} failed at transport level ({result['body'][:80]}).")
         if result["status"] == 403 and "cloudflare" in result["body"].lower():
             raise AlectraError("Blocked by Cloudflare; retry in a browser session.")
         if result["status"] == 401:
@@ -349,6 +401,7 @@ class AlectraSession:
         the uuid taken from the JWT claims. Shapes are parsed defensively
         (nothing here is publicly documented).
         """
+        await self._ensure_working_token()
         meters: list[MeterInfo] = []
         seen: set[tuple[str, str]] = set()
 
@@ -492,6 +545,45 @@ def _extract_access_token(body: dict) -> str | None:
         return None
     tokens = _JWT_RE.findall(json.dumps(body))
     return tokens[0] if tokens else None
+
+
+def _find_key(node, key_name):
+    """Depth-first search for a JSON field (case-insensitive) holding a JWT."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k.lower() == key_name.lower() and isinstance(v, str) and v.count(".") == 2:
+                return v
+        for v in node.values():
+            found = _find_key(v, key_name)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_key(item, key_name)
+            if found:
+                return found
+    return None
+
+
+def _collect_token_candidates(source) -> list[str]:
+    """JWT candidates with any field literally named 'accessToken' first.
+
+    The login response (and localStorage tokenKey) contain accessToken AND
+    refreshToken, both JWTs; naive regex-first grabs whichever appears first
+    and the API 401s on the refresh token.
+    """
+    candidates: list[str] = []
+    try:
+        access = _find_key(source, "accessToken")
+        if access:
+            candidates.append(access)
+    except Exception:
+        pass
+    text = source if isinstance(source, str) else json.dumps(source, default=str)
+    for tok in _JWT_RE.findall(text):
+        if tok not in candidates:
+            candidates.append(tok)
+    return candidates
 
 
 def _jwt_expiry(token: str) -> datetime | None:
