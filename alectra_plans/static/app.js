@@ -48,7 +48,7 @@ $("login-form").addEventListener("submit", async (ev) => {
       btn.disabled = false;
       return;
     }
-    showMeterStep(data.meters || []);
+    await discoverMeters();
   } catch (err) {
     $("login-error").textContent = err.message;
     show("login-error");
@@ -56,17 +56,29 @@ $("login-form").addEventListener("submit", async (ev) => {
   }
 });
 
+async function discoverMeters() {
+  hide("step-login");
+  show("step-meter");
+  $("meter-list").innerHTML = '<p class="hint">Looking up your meters…</p>';
+  try {
+    const data = await api(`/api/meters?session_id=${state.sessionId}`);
+    showMeterStep(data.meters || [], data.warning);
+  } catch (err) {
+    showMeterStep([], err.message);
+  }
+}
+
 $("tfa-code").addEventListener("keydown", async (ev) => {
   if (ev.key !== "Enter") return;
   ev.preventDefault();
   const code = $("tfa-code").value.trim();
   if (!code || !state.sessionId) return;
   try {
-    const data = await api("/api/tfa", {
+    await api("/api/tfa", {
       method: "POST",
       body: JSON.stringify({ session_id: state.sessionId, code }),
     });
-    showMeterStep(data.meters || []);
+    await discoverMeters();
   } catch (err) {
     $("login-error").textContent = err.message;
     show("login-error");
@@ -87,16 +99,22 @@ $("demo-btn").addEventListener("click", async () => {
 
 /* ---------------------------------------------------------------- step 2 */
 
-function showMeterStep(meters) {
+function showMeterStep(meters, warning) {
   currentMeters = meters || [];
   hide("step-login");
   show("step-meter");
   const list = $("meter-list");
   list.innerHTML = "";
+  if (warning) {
+    $("meter-error").textContent = warning;
+    show("meter-error");
+  } else {
+    hide("meter-error");
+  }
   if (!currentMeters.length) {
     $("manual-meter").open = true;
     $("manual-meter").querySelector("summary").textContent =
-      "Meter discovery returned nothing — enter account + meter manually";
+      "Meter lookup returned nothing — enter account + meter manually";
   }
   currentMeters.forEach((m, i) => {
     const row = document.createElement("label");

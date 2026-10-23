@@ -226,8 +226,13 @@ class AlectraSession:
         *,
         params: dict | None = None,
         body: dict | None = None,
+        timeout_s: float = 25.0,
     ) -> dict:
-        """Call the SCM API from inside the page (browser TLS + CORS + cf cookies)."""
+        """Call the SCM API from inside the page (browser TLS + CORS + cf cookies).
+
+        The in-page fetch carries an AbortController timeout: a Cloudflare
+        challenge loop would otherwise hang the request forever.
+        """
         if not self.page:
             raise AlectraError("session not started")
         if not self.access_token:
@@ -237,24 +242,43 @@ class AlectraSession:
             from urllib.parse import urlencode
 
             url += ("&" if "?" in url else "?") + urlencode(params)
-        result = await self.page.evaluate(
-            """async ({method, url, body, token}) => {
-                const resp = await fetch(url, {
-                    method,
-                    headers: {
-                        'accept': 'application/json, text/plain, */*',
-                        'authorization': 'Bearer ' + token,
-                        'pt': '1',
-                        'uid': '1',
-                    },
-                    body: body === null || body === undefined ? undefined : JSON.stringify(body),
-                    credentials: 'include',
-                });
-                const text = await resp.text();
-                return {status: resp.status, body: text};
-            }""",
-            {"method": method, "url": url, "body": body, "token": self.access_token},
-        )
+        try:
+            result = await self.page.evaluate(
+                """async ({method, url, body, token, timeoutMs}) => {
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+                    try {
+                        const resp = await fetch(url, {
+                            method,
+                            headers: {
+                                'accept': 'application/json, text/plain, */*',
+                                'authorization': 'Bearer ' + token,
+                                'pt': '1',
+                                'uid': '1',
+                            },
+                            body: body === null || body === undefined ? undefined : JSON.stringify(body),
+                            credentials: 'include',
+                            signal: ctrl.signal,
+                        });
+                        const text = await resp.text();
+                        return {status: resp.status, body: text};
+                    } finally {
+                        clearTimeout(timer);
+                    }
+                }""",
+                {
+                    "method": method,
+                    "url": url,
+                    "body": body,
+                    "token": self.access_token,
+                    "timeoutMs": int(timeout_s * 1000),
+                },
+            )
+        except Exception as exc:
+            raise AlectraError(
+                f"Request to {path} failed or timed out after {timeout_s:.0f}s. "
+                "If this repeats, restart and log in with 'show browser' enabled."
+            ) from exc
         if result["status"] == 403 and "cloudflare" in result["body"].lower():
             raise AlectraError("Blocked by Cloudflare; retry in a browser session.")
         if result["status"] == 401:

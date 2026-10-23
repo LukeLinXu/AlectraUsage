@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import sys
 import time
 import uuid
 import webbrowser
@@ -26,6 +27,12 @@ from . import analysis
 from .cache import UsageCache
 from .client import AlectraError, AlectraSession, LoginFailed, TfaRequired
 from .models import UsageRecord
+
+
+def _log(message: str) -> None:
+    """Timestamped progress lines to stdout (/tmp/alectra_server.log when nohup'd)."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", file=sys.stderr, flush=True)
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_MONTHS = 36
@@ -141,6 +148,7 @@ def _compute_analysis(job: FetchJob) -> dict:
 
 
 async def _run_fetch(job: FetchJob, ui: UiSession) -> None:
+    _log(f"fetch {job.account_number}/{job.meter_number}: {len(job.months)} months starting")
     try:
         entries = await ui.session.fetch_range(
             job.account_number,
@@ -154,9 +162,11 @@ async def _run_fetch(job: FetchJob, ui: UiSession) -> None:
         job.records = [UsageRecord.from_api(e) for e in entries]
         _compute_analysis(job)
         job.state = "done"
+        _log(f"fetch done: {len(entries)} hourly records")
     except Exception as exc:  # surface to the UI, keep server alive
         job.state = "error"
         job.error = str(exc)
+        _log(f"fetch error: {exc!r}")
         try:
             await ui.session.close()
         except Exception:
@@ -165,6 +175,7 @@ async def _run_fetch(job: FetchJob, ui: UiSession) -> None:
 
 def _note(job: FetchJob, done: int, total: int, key: str) -> None:
     job.done = done
+    _log(f"  month {key} fetched ({done}/{total})")
 
 
 # ------------------------------------------------------------------ routes
@@ -172,7 +183,9 @@ def _note(job: FetchJob, done: int, total: int, key: str) -> None:
 
 @app.post("/api/login")
 async def login(req: LoginRequest):
+    """Authenticate only; meter discovery is a separate step with its own status."""
     _expire_sessions()
+    _log(f"login attempt for {req.username[:3]}*** (show_browser={req.show_browser})")
     ui = UiSession(session=AlectraSession(headless=not req.show_browser))
     await ui.session.__aenter__()
     try:
@@ -180,32 +193,45 @@ async def login(req: LoginRequest):
     except TfaRequired as exc:
         sid = uuid.uuid4().hex
         SESSIONS[sid] = ui
+        _log("login requires TFA")
         return {"status": "tfa_required", "session_id": sid, "message": str(exc)}
     except (LoginFailed, AlectraError) as exc:
         await ui.session.close()
+        _log(f"login failed: {exc}")
         raise HTTPException(401, str(exc))
     except Exception as exc:
         await ui.session.close()
+        _log(f"login crashed: {exc!r}")
         raise HTTPException(500, f"Login failed: {exc}")
 
     sid = uuid.uuid4().hex
-    try:
-        ui.meters = await ui.session.list_meters()
-    except AlectraError as exc:
-        SESSIONS[sid] = ui  # keep the login; meter discovery can be retried
-        return {
-            "status": "ok_no_meters",
-            "session_id": sid,
-            "meters": [],
-            "message": f"Logged in, but meter discovery failed: {exc}. "
-            "You can still enter your account + meter number manually.",
-        }
     SESSIONS[sid] = ui
-    return {
-        "status": "ok",
-        "session_id": sid,
-        "meters": [m.__dict__ for m in ui.meters],
-    }
+    _log("login ok; token captured")
+    return {"status": "ok", "session_id": sid}
+
+
+@app.get("/api/meters")
+async def meters(session_id: str):
+    """Discover accounts/meters for a logged-in session (hard-capped in time)."""
+    ui = _get_session(session_id)
+    if ui.meters:
+        return {"meters": [m.__dict__ for m in ui.meters]}
+    try:
+        ui.meters = await asyncio.wait_for(ui.session.list_meters(), timeout=45)
+    except asyncio.TimeoutError:
+        _log("meter discovery timed out after 45s")
+        return {
+            "meters": [],
+            "warning": "Meter lookup timed out. Enter your account + meter numbers manually.",
+        }
+    except Exception as exc:
+        _log(f"meter discovery failed: {exc!r}")
+        return {
+            "meters": [],
+            "warning": f"Meter lookup failed ({exc}). Enter your account + meter numbers manually.",
+        }
+    _log(f"meter discovery ok: {len(ui.meters)} meter(s)")
+    return {"meters": [m.__dict__ for m in ui.meters]}
 
 
 @app.post("/api/tfa")
@@ -213,10 +239,11 @@ async def tfa(req: TfaRequest):
     ui = _get_session(req.session_id)
     try:
         await ui.session.submit_tfa(req.code)
-        ui.meters = await ui.session.list_meters()
+        _log("TFA accepted; token captured")
     except Exception as exc:
+        _log(f"TFA failed: {exc!r}")
         raise HTTPException(401, f"Verification failed: {exc}")
-    return {"status": "ok", "meters": [m.__dict__ for m in ui.meters]}
+    return {"status": "ok"}
 
 
 @app.post("/api/usage")
