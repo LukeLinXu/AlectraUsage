@@ -113,6 +113,24 @@ python3 -m venv .venv
 .venv/bin/python scripts/recon_login.py [--headed]   # inspect the portal login page
 ```
 
+### Share as a ZCode skill
+
+The project is bundled as a self-contained skill folder
+(`~/.agents/skills/alectra-plan-compare/`: this code + `setup.sh` +
+`save_credentials.py` + SKILL.md). To share it, copy that whole folder into
+the recipient's `~/.agents/skills/` and have them run `setup.sh` once, then
+`save_credentials.py` themselves (the password is typed locally, never in
+chat). Sync the bundle after code changes:
+
+```bash
+rsync -a --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
+      --exclude 'data' --exclude 'captures' --exclude '*.egg-info' \
+      --exclude '.pytest_cache' \
+      ./ ~/.agents/skills/alectra-plan-compare/project/
+cp tests/data/*.json ~/.agents/skills/alectra-plan-compare/project/tests/data/
+```
+
+
 Project layout:
 
 ```
