@@ -80,6 +80,7 @@ class AlectraSession:
     tfa_pending: bool = False
     last_login_response: dict = field(default_factory=dict)
     _captured: list[dict] = field(default_factory=list)  # SPA's own API traffic
+    _recorder_attached: bool = False
 
     async def __aenter__(self) -> "AlectraSession":
         self._pw = await async_playwright().start()
@@ -138,8 +139,7 @@ class AlectraSession:
         # exact right URLs, params, cookies and WAF state. We mine those
         # responses instead of guessing endpoint shapes: direct calls from
         # a fresh context hang behind Cloudflare even with a valid token.
-        self._captured.clear()
-        page.on("response", self._record_response)
+        await self.attach_recorder()
         await page.wait_for_timeout(7000)  # let the dashboard fire its calls
 
     async def _record_response(self, response) -> None:
@@ -162,6 +162,9 @@ class AlectraSession:
 
     async def attach_recorder(self) -> None:
         """Start recording the portal's own API traffic (for mining later)."""
+        if self._recorder_attached:
+            return
+        self._recorder_attached = True
         self._captured.clear()
         self.page.on("response", self._record_response)
 

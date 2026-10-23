@@ -7,7 +7,15 @@ by month (hard per-month timeout), and writes a plan-comparison report.
 
 Usage:
   .venv/bin/python scripts/skill_fetch.py [--months 12] [--tesla-kwh 250]
-          [--account N] [--meter N] [--login-timeout 300]
+          [--account N] [--meter N] [--login-timeout 300] [--username NAME]
+
+Login modes:
+  * default: you log in manually in the opened browser window.
+  * --username NAME: the script fills the login form automatically (the page
+    still solves reCAPTCHA/signature itself). The password comes from the
+    ALECTRA_PASSWORD env var or ~/.alectra-credentials (JSON:
+    {"username": "...", "password": "..."}, chmod 600). It never appears in
+    argv, logs, or chat. If the account has 2FA, finish it in the window.
 
 Outputs:
   ~/.cache/alectra-plan-compare/<account>_<meter>/<YYYY-MM>.json  (raw cache)
@@ -51,6 +59,32 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def load_password(username: str) -> str | None:
+    """Password from $ALECTRA_PASSWORD or ~/.alectra-credentials (never argv)."""
+    import os
+
+    if os.environ.get("ALECTRA_PASSWORD"):
+        return os.environ["ALECTRA_PASSWORD"]
+    cred_file = Path.home() / ".alectra-credentials"
+    if not cred_file.exists():
+        return None
+    mode = oct(cred_file.stat().st_mode & 0o777)
+    if mode != "0o600":
+        log(f"WARNING: {cred_file} is mode {mode}; chmod 600 it.")
+    try:
+        data = json.loads(cred_file.read_text())
+    except json.JSONDecodeError:
+        log(f"ERROR: {cred_file} is not valid JSON.")
+        return None
+    if isinstance(data, dict) and data.get("password"):
+        if data.get("username") in (None, "", username):
+            return data["password"]
+        log(f"ERROR: {cred_file} is for user '{data.get('username')}', not '{username}'.")
+        return None
+    log(f"ERROR: {cred_file} must be {{\"username\": ..., \"password\": ...}}")
+    return None
+
+
 async def run(args: argparse.Namespace) -> int:
     async with AlectraSession(headless=False) as session:
         page = session.page
@@ -58,12 +92,34 @@ async def run(args: argparse.Namespace) -> int:
             "https://myalectra.alectrautilities.com/portal/#/login",
             wait_until="domcontentloaded",
         )
-        log("Browser window is open -> please log in to My Alectra in it.")
-        log(f"Waiting up to {args.login_timeout:.0f}s for the login to complete...")
         await session.attach_recorder()
-        if not await session.wait_for_manual_login(timeout_s=args.login_timeout):
-            log("TIMED OUT waiting for login. Nothing was fetched.")
-            return 2
+
+        if args.username:
+            password = load_password(args.username)
+            if not password:
+                log("No password available (set ALECTRA_PASSWORD or create ~/.alectra-credentials).")
+                return 2
+            log(f"Auto-filling the login form for {args.username[:3]}*** in the browser...")
+            try:
+                await asyncio.wait_for(
+                    session.login(args.username, password), timeout=90
+                )
+            except AlectraError as exc:
+                if "one-time verification code" in str(exc) or "TFA" in str(exc).upper():
+                    log("2FA required — enter the code in the browser window; waiting...")
+                    if not await session.wait_for_manual_login(timeout_s=180):
+                        log("TIMED OUT waiting for the 2FA code.")
+                        return 2
+                else:
+                    log(f"LOGIN FAILED: {exc}")
+                    return 1
+        else:
+            log("Browser window is open -> please log in to My Alectra in it.")
+            log(f"Waiting up to {args.login_timeout:.0f}s for the login to complete...")
+            if not await session.wait_for_manual_login(timeout_s=args.login_timeout):
+                log("TIMED OUT waiting for login. Nothing was fetched.")
+                return 2
+
         exp = session.token_expiry.strftime("%Y-%m-%d %H:%M UTC") if session.token_expiry else "?"
         log(f"Login captured (token expires {exp}). Letting the dashboard settle...")
         await page.wait_for_timeout(8000)
@@ -170,6 +226,11 @@ def main() -> None:
     parser.add_argument("--account", default=None)
     parser.add_argument("--meter", default=None)
     parser.add_argument("--login-timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--username",
+        default=None,
+        help="auto-fill the login form; password from ALECTRA_PASSWORD or ~/.alectra-credentials",
+    )
     args = parser.parse_args()
     try:
         raise SystemExit(asyncio.run(run(args)))
