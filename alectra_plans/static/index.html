@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alectra Plan Compare</title>
+<link rel="stylesheet" href="style.css">
+<script src="vendor/chart.umd.min.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>⚡ Alectra Plan Compare</h1>
+  <p class="sub">Which Ontario rate plan is cheapest for <em>your</em> actual usage — Tiered, Time-of-Use, or Ultra-Low Overnight?</p>
+</header>
+
+<main>
+  <!-- STEP 1: login -->
+  <section id="step-login" class="card">
+    <h2>1 · Log in to My Alectra</h2>
+    <p class="hint">Your credentials are sent only to Alectra, from your own machine. Nothing is stored.</p>
+    <form id="login-form">
+      <label>Username <input type="text" id="username" autocomplete="off" required></label>
+      <label>Password <input type="password" id="password" autocomplete="off" required></label>
+      <label class="check"><input type="checkbox" id="show-browser"> Show the browser window while logging in (helps if login fails silently)</label>
+      <div id="tfa-row" class="hidden">
+        <label>Verification code (just sent to you)
+          <input type="text" id="tfa-code" inputmode="numeric" autocomplete="one-time-code">
+        </label>
+      </div>
+      <button type="submit" id="login-btn">Log in</button>
+      <button type="button" id="demo-btn" class="secondary">Try with sample data</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+  </section>
+
+  <!-- STEP 2: meter -->
+  <section id="step-meter" class="card hidden">
+    <h2>2 · Pick a meter</h2>
+    <div id="meter-list"></div>
+    <details id="manual-meter">
+      <summary>Enter account + meter manually</summary>
+      <label>Account number <input type="text" id="manual-account"></label>
+      <label>Meter number <input type="text" id="manual-meter-number"></label>
+    </details>
+    <label>How far back? <select id="months-back">
+      <option value="6">6 months</option>
+      <option value="12" selected>12 months</option>
+      <option value="18">18 months</option>
+      <option value="24">24 months</option>
+    </select></label>
+    <button id="fetch-btn">Fetch usage &amp; compare plans</button>
+    <p id="meter-error" class="error hidden"></p>
+  </section>
+
+  <!-- STEP 3: progress -->
+  <section id="step-progress" class="card hidden">
+    <h2>3 · Fetching your hourly data…</h2>
+    <div class="progress"><div id="progress-bar"></div></div>
+    <p id="progress-text">…</p>
+    <p id="progress-error" class="error hidden"></p>
+  </section>
+
+  <!-- STEP 4: results -->
+  <section id="step-results" class="hidden">
+    <div id="verdict" class="verdict"></div>
+
+    <div class="summary-cards" id="summary-cards"></div>
+
+    <div class="card">
+      <h2>Month by month</h2>
+      <div class="table-wrap"><table id="monthly-table"></table></div>
+      <p class="hint">“Alectra billed” is the energy charge your current plan actually recorded for those hours — a sanity check on the math. Delivery, regulatory and HST are the same on every plan, so they're excluded.</p>
+      <canvas id="monthly-chart" height="110"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>When you use power</h2>
+      <canvas id="profile-chart" height="110"></canvas>
+      <p class="hint">Average kWh per hour of day. Weekends and holidays are always off-peak on every plan.</p>
+    </div>
+
+    <div class="card">
+      <h2>Tesla / EV overnight charging simulation</h2>
+      <p class="hint">Moves the kWh you enter each month into the 11pm–7am window (highest-usage hours are trimmed first, keeping 1 kWh/h as base house load) and re-prices every plan.</p>
+      <div class="tesla-row">
+        <label>kWh per month <input type="number" id="tesla-kwh" value="250" min="0" step="10"></label>
+        <button id="tesla-btn">Simulate</button>
+      </div>
+      <div id="tesla-out"></div>
+    </div>
+
+    <div class="actions">
+      <button id="csv-btn" class="secondary">Download CSV</button>
+      <button id="restart-btn" class="secondary">Start over</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Unofficial tool for Alectra customers · rates from the <a href="https://www.oeb.ca/rates-and-your-bill/electricity-rates" target="_blank" rel="noreferrer">OEB</a> (correct period applied per month) · energy charge only · runs entirely on your machine.</p>
+</footer>
+</body>
+</html>
