@@ -79,6 +79,7 @@ class AlectraSession:
     token_expiry: datetime | None = None
     tfa_pending: bool = False
     last_login_response: dict = field(default_factory=dict)
+    _captured: list[dict] = field(default_factory=list)  # SPA's own API traffic
 
     async def __aenter__(self) -> "AlectraSession":
         self._pw = await async_playwright().start()
@@ -131,8 +132,33 @@ class AlectraSession:
             return
 
         self._set_tokens(token, body)
-        # Keep the page on the portal origin: later API calls are made from
-        # here so they share the browser's TLS fingerprint + cf cookies.
+
+        # Record the portal's own post-login traffic. The SPA loads the
+        # dashboard and calls the account/meter endpoints itself — with the
+        # exact right URLs, params, cookies and WAF state. We mine those
+        # responses instead of guessing endpoint shapes: direct calls from
+        # a fresh context hang behind Cloudflare even with a valid token.
+        self._captured.clear()
+        page.on("response", self._record_response)
+        await page.wait_for_timeout(7000)  # let the dashboard fire its calls
+
+    async def _record_response(self, response) -> None:
+        try:
+            url = response.url
+            if "smartcmobile.link" not in url or "/Login/auth" in url:
+                return
+            body = await self._safe_json(response)
+            post = None
+            try:
+                post = response.request.post_data
+            except Exception:
+                pass
+            self._captured.append({"url": url, "json": body, "post": post})
+        except Exception:
+            pass
+
+    def captured_urls(self) -> list[str]:
+        return [c["url"] for c in self._captured]
 
     async def submit_tfa(self, code: str) -> None:
         """Enter the one-time code in the portal UI and wait for the token."""
@@ -166,6 +192,7 @@ class AlectraSession:
             if token:
                 self._set_tokens(token, {})
                 self.tfa_pending = False
+                await self.page.wait_for_timeout(5000)  # dashboard calls -> _captured
                 return
             await asyncio.sleep(1)
         raise LoginFailed("TFA code did not produce an access token within 30s.")
@@ -293,43 +320,56 @@ class AlectraSession:
     async def list_meters(self) -> list[MeterInfo]:
         """Discover accounts + meters for the logged-in user.
 
-        The SPA syncs account details after login and queries meters per
-        account; both response shapes are parsed defensively (they are not
-        publicly documented and may vary per utility configuration).
+        Primary source: the SPA's own post-login traffic captured in
+        ``login()`` — its responses contain the real account/meter records.
+        Fallback: the ``Addresses/User/{uuid}`` endpoint the SPA uses, with
+        the uuid taken from the JWT claims. Shapes are parsed defensively
+        (nothing here is publicly documented).
         """
-        sync = await self.api("POST", "/UsermanagementAPI/api/1/login/SyncUserAccountDetails", body={})
-        accounts = _harvest_accounts(sync)
         meters: list[MeterInfo] = []
         seen: set[tuple[str, str]] = set()
 
-        for acc in accounts or [None]:
-            payload = await self._get_meters_for(acc)
-            for m in _harvest_meters(payload, acc):
-                key = (m.account_number, m.meter_number)
-                if key not in seen and m.meter_number:
-                    seen.add(key)
-                    meters.append(m)
-        return meters
+        def add_from(payload: dict) -> None:
+            for acc in _harvest_accounts(payload) or [None]:
+                for m in _harvest_meters(payload, acc):
+                    key = (m.account_number, m.meter_number)
+                    if key not in seen and m.meter_number:
+                        seen.add(key)
+                        meters.append(m)
 
-    async def _get_meters_for(self, account: dict | None) -> dict:
-        attempts = []
-        if account:
-            for key in ("accountNumber", "account_number", "AccountNumber"):
-                if account.get(key):
-                    attempts.append({key: account[key]})
-                    attempts.append({"AccountNumber": account[key]})
-                if account.get("uuid") or account.get("Uuid"):
-                    uid = account.get("uuid") or account.get("Uuid")
-                    attempts.append({"uuid": uid, "AccountNumber": account.get(key, "")})
-        attempts.append({})
-        last = {}
-        for payload in attempts:
-            last = await self.api(
-                "GET", "/UsermanagementAPI/api/1/account/GetMetersByUuidOrAccountID", params=payload
+        # 1) mine the portal's own traffic
+        for cap in list(self._captured):
+            add_from(cap["json"])
+        if meters:
+            return meters
+
+        # 2) direct call to the endpoint the SPA itself uses
+        uuid_claim = _uuid_from_token(self.access_token or "")
+        if uuid_claim:
+            try:
+                payload = await self.api(
+                    "GET",
+                    f"/AccountManagementAPI/api/1/Addresses/User/{uuid_claim}",
+                    timeout_s=25,
+                )
+                add_from(payload)
+            except AlectraError:
+                pass
+            if meters:
+                return meters
+
+        # 3) last resort: the documented-by-bundle meter endpoint
+        try:
+            payload = await self.api(
+                "GET",
+                "/UsermanagementAPI/api/1/account/GetMetersByUuidOrAccountID",
+                params={"uuid": uuid_claim} if uuid_claim else {},
+                timeout_s=15,
             )
-            if _harvest_meters(last, account):
-                return last
-        return last
+            add_from(payload)
+        except AlectraError:
+            pass
+        return meters
 
     async def fetch_month(
         self, account_number: str, meter_number: str, year: int, month: int
@@ -412,17 +452,31 @@ def _extract_access_token(body: dict) -> str | None:
 
 
 def _jwt_expiry(token: str) -> datetime | None:
+    claims = _jwt_claims(token)
+    if claims and (exp := claims.get("exp")):
+        try:
+            return datetime.utcfromtimestamp(int(exp))
+        except (TypeError, ValueError, OSError):
+            return None
+    return None
+
+
+def _uuid_from_token(token: str) -> str | None:
+    claims = _jwt_claims(token)
+    if claims and claims.get("Uuid"):
+        return str(claims["Uuid"])
+    return None
+
+
+def _jwt_claims(token: str) -> dict | None:
     import base64
 
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-        if exp := claims.get("exp"):
-            return datetime.utcfromtimestamp(int(exp))
+        return json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return None
-    return None
 
 
 def _mask(body: dict) -> dict:

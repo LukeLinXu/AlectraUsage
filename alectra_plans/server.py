@@ -217,20 +217,26 @@ async def meters(session_id: str):
     if ui.meters:
         return {"meters": [m.__dict__ for m in ui.meters]}
     try:
-        ui.meters = await asyncio.wait_for(ui.session.list_meters(), timeout=45)
+        ui.meters = await asyncio.wait_for(ui.session.list_meters(), timeout=60)
     except asyncio.TimeoutError:
-        _log("meter discovery timed out after 45s")
+        _log("meter discovery timed out")
+        _log("portal called during login: " + " | ".join(ui.session.captured_urls()[:25]))
         return {
             "meters": [],
             "warning": "Meter lookup timed out. Enter your account + meter numbers manually.",
         }
     except Exception as exc:
         _log(f"meter discovery failed: {exc!r}")
+        _log("portal called during login: " + " | ".join(ui.session.captured_urls()[:25]))
         return {
             "meters": [],
             "warning": f"Meter lookup failed ({exc}). Enter your account + meter numbers manually.",
         }
-    _log(f"meter discovery ok: {len(ui.meters)} meter(s)")
+    if not ui.meters:
+        _log("meter discovery empty; portal called during login: "
+             + " | ".join(ui.session.captured_urls()[:25]))
+    else:
+        _log(f"meter discovery ok: {len(ui.meters)} meter(s)")
     return {"meters": [m.__dict__ for m in ui.meters]}
 
 
