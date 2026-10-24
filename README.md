@@ -1,78 +1,159 @@
 # ⚡ Alectra Plan Compare
 
 **Which Ontario electricity rate plan is cheapest for *your* actual usage?**
-Tiered, Time-of-Use (TOU), or Ultra-Low Overnight (ULO) — computed from your real
-hourly smart-meter data, not averages or guesses.
+Tiered, Time-of-Use (TOU), or Ultra-Low Overnight (ULO) — computed hour by hour
+from your real smart-meter data, not averages or guesses.
 
-Log in to My Alectra from a small local web app, pick one of your meters, pull the
-last 6–24 months of hourly usage, and see exactly what each plan would have cost,
-month by month — plus an EV/Tesla overnight-charging simulation.
+Point it at your My Alectra account and it will log in, list the meters on your
+account, pull up to 24 months of hourly usage, and price every hour on all
+three plans using the OEB rate schedule that was actually in effect each month.
+Includes an EV / Tesla overnight-charging simulation.
 
-**哪档电价最划算？** 用你自己的逐小时电表数据算 Tiered / TOU / ULO 三种方案，
-支持 Tesla 深夜充电挪峰模拟。中文说明见下方。
+**中文教程在下方(中文说明部分)。**
 
 ---
 
-## Quick start
+## Features
 
-Requires Python 3.11+ (uses [Playwright](https://playwright.dev) Chromium; download
-it once):
+- 🔐 **Automated portal login** in a real Chromium window — the portal's own
+  reCAPTCHA runs as usual, nothing to solve. Supports 2FA.
+- 📊 **Meter discovery** — accounts can hold several meters; the tool lists
+  them (or type the account + meter numbers manually).
+- ⏱ **Hourly accuracy** — every hour is classified into its TOU/ULO period
+  (season, weekday/weekend, statutory holidays) and priced with the rate
+  schedule in effect that month. Tiering is applied per month per OEB rules.
+- 🚗 **EV simulation** — re-prices N kWh/month of charging into the
+  11pm–7am window and shows which plan wins after the shift.
+- 📈 **Web UI** (four-step wizard with charts) **and** a headless CLI —
+  same engine.
+- 💾 **Local cache** — fetched months are stored locally; re-runs are instant.
+- 🧩 **ZCode skill bundle** — folder you can drop into an AI agent as a skill
+  and share with friends.
+
+## Requirements
+
+- macOS / Linux with **Python 3.11+**
+- An **Alectra Utilities** account (My Alectra portal) — this tool speaks
+  Alectra's portal API only
+- ~200 MB disk for the Playwright Chromium download
+
+## Quick start (web UI)
 
 ```bash
-git clone <this-repo> && cd alectra-plan-compare
-python3 -m venv .venv
+git clone git@github.com:LukeLinXu/AlectraUsage.git
+cd AlectraUsage
+python3.12 -m venv .venv            # any Python ≥ 3.11
 .venv/bin/pip install -e .
 .venv/bin/playwright install chromium
-.venv/bin/alectra-plans          # opens http://127.0.0.1:8765 in your browser
+.venv/bin/alectra-plans             # opens http://127.0.0.1:8765
 ```
 
-No account handy? Click **“Try with sample data”** on the login screen to see the
-full report with bundled real (anonymized-shaped) monthly data.
+Then in the browser page that opens:
+
+1. **Log in** with your My Alectra username/password. If your account has
+   two-factor authentication, an input for the one-time code appears.
+   If login seems to hang, tick *“Show the browser window”* and retry.
+2. **Pick a meter** from the list (or expand *Enter account + meter manually*).
+3. **Fetch** — choose 6/12/18/24 months back; one API request per month, with
+   a progress bar.
+4. **Results** — per-month and total costs on all three plans, which plan wins
+   each month, an hourly-usage profile chart, the Tesla simulation panel, and
+   a CSV download.
+
+No account handy? Click **“Try with sample data”** to see the full report with
+bundled fixtures.
+
+## CLI / skill usage
+
+```bash
+.venv/bin/python scripts/skill_fetch.py --username <name> --months 12 --tesla-kwh 250
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--months` | `12` | How far back (1–36; current partial month included) |
+| `--tesla-kwh` | off | Simulate N kWh/month of EV charging, all overnight |
+| `--username` | manual login | Auto-fill the login form; password read from `~/.alectra-credentials` or `$ALECTRA_PASSWORD` |
+| `--account` / `--meter` | auto-discovered | Skip meter discovery |
+| `--login-timeout` | `300` | Seconds to wait for a manual login |
+
+Without `--username`, a Chromium window opens and **you log in yourself** —
+the script never sees the password. With `--username`, create the credentials
+file first (it stays on your machine, chmod 600):
+
+```bash
+cat > ~/.alectra-credentials <<'EOF'
+{"username": "you@example.com", "password": "secret"}
+EOF
+chmod 600 ~/.alectra-credentials
+```
+
+Output: a per-month comparison table in the terminal plus
+`data/analysis_<account>_<meter>.json` and `.csv`. Raw months are cached in
+`~/.cache/alectra-plan-compare/` (files 0600) — delete the folder to refetch.
+
+### As a ZCode skill
+
+The `~/.agents/skills/alectra-plan-compare/` folder bundles this project with
+`setup.sh` (one-shot env bootstrap) and `save_credentials.py` (interactive
+hidden password prompt, run it yourself in a terminal). Copy the folder into
+the recipient's `~/.agents/skills/`, run setup once, then just tell the agent
+*“run the alectra skill for the last 12 months”*. See its `SKILL.md`.
+
+## Understanding the numbers
+
+- **Energy charge only.** Delivery, regulatory, HST and the Ontario
+  Electricity Rebate are identical across plans, so they're excluded — your
+  real bill will be higher, but the *ranking* of plans is unaffected.
+- The **current (partial) month** under-states a full month.
+- Tiered assumes **residential** thresholds (600 kWh/month May–Oct,
+  1,000 kWh/month Nov–Apr).
+- Sanity check: every fetched hour carries the charge Alectra's own billing
+  recorded for it; the tool shows it as *“Alectra billed”* in the web UI, and
+  the test suite asserts the engine reproduces it.
 
 ## How it works
 
-1. **Log in** — the app drives the real My Alectra portal in a Chromium window
-   (headless by default). The portal's own reCAPTCHA runs as usual, so you don't
-   solve puzzles. If your account has two-factor authentication, the app asks for
-   the one-time code.
-2. **Pick a meter** — accounts can have several meters; the app lists what your
-   account has (or enter the account + meter numbers manually).
-3. **Fetch** — one API request per month of hourly data (results cached locally in
-   `~/.cache/alectra-plan-compare/`, so re-runs are instant).
-4. **Compare** — every hour is priced on all three plans using the OEB rate period
-   that was actually in effect that month, with Ontario holidays treated as
-   off-peak. Delivery/regulatory charges and HST are excluded (identical on all
-   plans).
+```
+Playwright Chromium ── login on the real portal (reCAPTCHA v3 by the page,
+                       optional TFA) ──> access + refresh token
+        │
+        └─ in-page XHR (browser TLS — passes Cloudflare) ──>
+             AccountManagementAPI  → meters on your account
+             UsageAPI/api/V1/Electric?Periodicity=HH  → hourly kWh, month by month
+        │
+   rate engine (alectra_plans/rates.py)
+     OEB schedules by effective date + Ontario holiday calendar
+        │
+   analysis: Tiered / TOU / ULO per hour → month → totals → EV simulation
+```
 
-### The EV simulation
+Verified details, for the curious:
 
-Enter your monthly charging kWh; the tool removes them from your highest-usage
-hours (keeping 1 kWh/h as base house load) and re-prices them at the 11pm–7am
-rate. That's exact for TOU and ULO because 23:00–07:00 is a single flat block in
-both plans.
+- The portal is a **SilverBlaze "Smart Customer Mobile"** SPA; login is
+  `POST UsermanagementAPI/api/1/Login/auth` and the usage endpoint is
+  `GET UsageAPI/api/V1/Electric?AccountNumber=&MeterNumber=&From=&To=&Uom=kWh&Periodicity=HH`.
+- The API host sits behind **Cloudflare**: non-browser TLS gets 403, and
+  plain `fetch()` from the page silently hangs — the working transport is an
+  in-page **XMLHttpRequest**, same as the portal's own axios calls.
+- The login response contains **accessToken and refreshToken, both JWTs** —
+  only the former works on business endpoints (the token is validated against
+  an authenticated endpoint before use).
+- Meter discovery mines the portal's **own post-login traffic** (the dashboard
+  calls account/meter endpoints itself) instead of guessing shapes.
 
 ## Privacy & security
 
-- Runs **entirely on your machine**, binds to `127.0.0.1` only.
-- Your password goes once to Alectra's login endpoint through the app's browser and
-  is never written to disk or logs. Tokens stay in memory and die with the process.
-- Fetched usage data is cached under `~/.cache/alectra-plan-compare/` (0600
-  permissions) purely so you don't re-download it.
+- Runs **entirely on your machine**; the web UI binds to `127.0.0.1` only.
+- The password goes **once** to Alectra's login endpoint through the app's
+  browser and is never written to disk or logs. Tokens stay in memory and die
+  with the process.
+- Cached usage data lives under `~/.cache/alectra-plan-compare/` (0600) so you
+  don't re-download it.
+- Test fixtures in `tests/data/` are real usage shapes with all identifiers
+  replaced.
 
-## Honest caveats
-
-- **Unofficial.** This drives a portal that has no public API. Alectra can change
-  it at any time; if login breaks, check for an updated repo. Don't hammer it —
-  the tool fetches one month per request.
-- **Energy charge only.** Delivery, regulatory, HST, and the Ontario Electricity
-  Rebate are the same regardless of plan, so they're excluded from the
-  comparison. The absolute bill totals will differ from your actual bill.
-- Tiered thresholds assume residential (600 kWh summer / 1000 kWh winter).
-- Rate tables live in `alectra_plans/rates.py`, transcribed from the
-  [OEB](https://www.oeb.ca/rates-and-your-bill/electricity-rates). The OEB now
-  sets prices once a year (Nov 1); add the new period there each autumn.
-
-## Rate data (verified from OEB, ¢/kWh)
+## Rate data (from the OEB, ¢/kWh)
 
 | Effective | TOU off/mid/on | Tiered T1/T2 | ULO night / wknd-off / mid / on |
 |---|---|---|---|
@@ -81,69 +162,60 @@ both plans.
 | Nov 1 2024 | 7.6 / 12.2 / 15.8 | 9.3 / 11.0 | 2.8 / 7.6 / 12.2 / 28.4 |
 | Nov 1 2023 | 8.7 / 12.2 / 18.2 | 10.3 / 12.5 | 2.8 / 8.7 / 12.2 / 28.6 |
 
----
+Sources: [OEB electricity rates](https://www.oeb.ca/rates-and-your-bill/electricity-rates)
+· [historical rates](https://www.oeb.ca/rates-and-your-bill/electricity-rates/historical-electricity-rates)
+· holiday schedule per [Alectra TOU page](https://alectrautilities.com/time-use-pricing).
+
+The OEB now sets prices **once a year on Nov 1**. When a new period starts,
+append it to `RPP_PERIODS` in `alectra_plans/rates.py` (and the new year's
+holidays to `HOLIDAYS`) — then `pytest tests/` should stay green.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Login hangs with no response | Retry with the *show browser* box ticked; watch the window |
+| `Fetching YYYY-MM exceeded 90s` | WAF/network wedge; rerun once (cached months are skipped) |
+| `401` / session expired | Token died mid-run; rerun |
+| No meters discovered | Enter account + meter manually (they're on your bill) |
+| Wrong-plan numbers vs your bill | Are you comparing *total* bill? This tool ranks energy charge only |
 
 ## 中文说明
 
-这个工具回答一个问题：**按你的真实用电习惯，哪种电价方案最便宜？**
+这个工具回答一个问题:**按你的真实用电习惯,哪种电价方案最便宜?**
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/playwright install chromium
-.venv/bin/alectra-plans
-```
+安省电费有三种方案可以自己选:
 
-- 启动后自动打开 `http://127.0.0.1:8765`,输入 My Alectra 用户名密码(只在本机直传
-  Alectra,不落盘；开了双因素会提示输验证码)。
-- 选择电表 → 抓取过去 6–24 个月的逐小时数据(按月缓存,重跑秒出)。
-- 结果页:三方案逐月对比 + 总账 + 每月最便宜方案 + 用电时段曲线 + CSV 导出。
-- **Tesla 模拟**:输入每月充电度数,按 23:00–07:00 重算,看挪峰后哪个方案反超。
+- **Tiered 阶梯价**:不看时间,按月用量分级(夏 600 度/冬 1000 度以内一个价)
+- **TOU 分时**:什么时候用电决定价格,工作日白天贵、晚 7 点后和周末便宜
+- **ULO 超低谷**:每天 23:00–7:00 只要 3.9¢(全场最低),但工作日 16:00–21:00 高达 39.1¢
 
-结论参考(基于本机真实数据):不挪峰时 Tiered 在低用电月最划算;只要把 Tesla 充电
-全部放到深夜 11 点后,**ULO 就是最便宜的方案**。
+**怎么选(按生活方式):**
+
+- 🏠 **WFH 全天在家** → 大概率 **Tiered**:白天的用电躲不开任何高价时段
+- 🚶 **早出晚归** → 用电习惯好(洗碗机洗衣塞到晚 7 点后和周末)可以试 TOU,否则 Tiered
+- 🚗 **有电车能半夜充** → **无脑 ULO**:实测把充电挪到半夜后 ULO 从 $1,166 降到 $974,反超全场
+
+上手三步(见上面 Quick start):装好 → 浏览器里登录 My Alectra → 选电表抓 12 个月。
+或者用命令行:`scripts/skill_fetch.py --username 你的用户名 --months 12 --tesla-kwh 250`
+(先按上面的模板创建 `~/.alectra-credentials`,密码只存在本机)。
+
+隐私:全部本地运行;密码不落盘、不经过任何第三方;原始数据缓存在本机便于重跑。
 
 ## Development
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest tests/          # rate engine + real-data integration tests
-.venv/bin/python scripts/spike_login.py <user> <pass> --month 2025-06
-                                 # end-to-end smoke test with your own credentials
+.venv/bin/pytest tests/          # 29 tests: rate engine + real-data cross-checks
 .venv/bin/python scripts/recon_login.py [--headed]   # inspect the portal login page
 ```
 
-### Share as a ZCode skill
+Layout: `alectra_plans/` (rates · analysis · client · cache · server + static)
+· `scripts/` (skill entry + diagnostics) · `tests/`.
 
-The project is bundled as a self-contained skill folder
-(`~/.agents/skills/alectra-plan-compare/`: this code + `setup.sh` +
-`save_credentials.py` + SKILL.md). To share it, copy that whole folder into
-the recipient's `~/.agents/skills/` and have them run `setup.sh` once, then
-`save_credentials.py` themselves (the password is typed locally, never in
-chat). Sync the bundle after code changes:
+## Disclaimer
 
-```bash
-rsync -a --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
-      --exclude 'data' --exclude 'captures' --exclude '*.egg-info' \
-      --exclude '.pytest_cache' \
-      ./ ~/.agents/skills/alectra-plan-compare/project/
-cp tests/data/*.json ~/.agents/skills/alectra-plan-compare/project/tests/data/
-```
-
-
-Project layout:
-
-```
-alectra_plans/
-  rates.py     # OEB rate tables, holidays, per-hour pricing engine
-  analysis.py  # monthly aggregation, totals, Tesla shift simulation
-  client.py    # Playwright login + in-page fetch transport + meter discovery
-  cache.py     # local 0600 JSON cache (~/.cache/alectra-plan-compare)
-  server.py    # FastAPI app + static frontend (4-step wizard)
-scripts/       # recon & smoke-test utilities
-tests/         # pytest incl. real captured usage fixtures
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE). Not affiliated with Alectra Utilities or the OEB.
+Unofficial tool for Alectra customers, for querying **your own** account data.
+The portal has no public API and can change at any time; be gentle (the tool
+fetches one month per request). Not affiliated with Alectra Utilities or the
+OEB. MIT — see [LICENSE](LICENSE).
