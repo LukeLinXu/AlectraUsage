@@ -11,6 +11,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+# Probe targets: defaults are placeholders. Export ALECTRA_ACCOUNT /
+# ALECTRA_METER (or edit here) to probe a real account.
+import os as _os
+ACCOUNT = _os.environ.get("ALECTRA_ACCOUNT", "0000000000")
+METER = _os.environ.get("ALECTRA_METER", "DEMOMETER01")
+
+
 from alectra_plans.client import AlectraSession  # noqa: E402
 
 API = "https://alectra-svc.smartcmobile.link"
@@ -111,7 +118,7 @@ async def main():
         await probe(session, "addresses", f"/AccountManagementAPI/api/1/Addresses/User/{uuid_claim}", token)
 
         log("--- probe 2: UsageAPI Electric, plain (expect 401) ---")
-        params = ("?AccountNumber=0000000000&MeterNumber=DEMOMETER01"
+        params = (f"?AccountNumber={ACCOUNT}&MeterNumber={METER}"
                   "&From=2025-11-01&To=2025-11-30&Uom=kWh&Periodicity=HH")
         await probe(session, "usage-plain", "/UsageAPI/api/V1/Electric", token, params=params)
 

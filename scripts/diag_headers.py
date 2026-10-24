@@ -12,6 +12,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+# Probe targets: defaults are placeholders. Export ALECTRA_ACCOUNT /
+# ALECTRA_METER (or edit here) to probe a real account.
+import os as _os
+ACCOUNT = _os.environ.get("ALECTRA_ACCOUNT", "0000000000")
+METER = _os.environ.get("ALECTRA_METER", "DEMOMETER01")
+
+
 from alectra_plans.client import AlectraSession  # noqa: E402
 
 API = "https://alectra-svc.smartcmobile.link"
@@ -53,7 +60,7 @@ CAPTCHA_EVAL = """async (siteKey) => {
     });
 }"""
 
-PARAMS = ("?AccountNumber=0000000000&MeterNumber=DEMOMETER01"
+PARAMS = (f"?AccountNumber={ACCOUNT}&MeterNumber={METER}"
           "&From=2025-11-01&To=2025-11-30&Uom=kWh&Periodicity=HH")
 
 

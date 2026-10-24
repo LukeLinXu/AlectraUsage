@@ -14,6 +14,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+# Probe targets: defaults are placeholders. Export ALECTRA_ACCOUNT /
+# ALECTRA_METER (or edit here) to probe a real account.
+import os as _os
+ACCOUNT = _os.environ.get("ALECTRA_ACCOUNT", "0000000000")
+METER = _os.environ.get("ALECTRA_METER", "DEMOMETER01")
+
+
 from alectra_plans import analysis  # noqa: E402
 from alectra_plans.cache import UsageCache  # noqa: E402
 from alectra_plans.client import AlectraSession  # noqa: E402
@@ -109,7 +116,7 @@ async def main():
         r = await call(session, XHR_EVAL, "GET", "/ConfigurationAPI/api/1/Configuration/SystemMaintainance", token, 20)
         log(f"    status={r['status']} in {r['s']:.1f}s body={r['body'][:80]!r}")
 
-        params = ("?AccountNumber=0000000000&MeterNumber=DEMOMETER01"
+        params = (f"?AccountNumber={ACCOUNT}&MeterNumber={METER}"
                   "&From=2025-11-01&To=2025-11-30&Uom=kWh&Periodicity=HH")
         log("--- probe B: XHR on UsageAPI Electric (Nov 2025) ---")
         rb = await call(session, XHR_EVAL, "GET", "/UsageAPI/api/V1/Electric", token, 30, params)
@@ -146,13 +153,13 @@ async def main():
         import calendar as _cal
         for (yy, mm) in month_list:
             key = f"{yy:04d}-{mm:02d}"
-            if (cached := cache.load("0000000000", "DEMOMETER01", key)):
+            if (cached := cache.load(ACCOUNT, METER, key)):
                 all_entries.extend(cached)
                 log(f"  {key}: cache ({len(cached)} records)")
                 continue
             first = date(yy, mm, 1)
             last = date(yy, mm, _cal.monthrange(yy, mm)[1])
-            q = (f"?AccountNumber=0000000000&MeterNumber=DEMOMETER01"
+            q = (f"?AccountNumber={ACCOUNT}&MeterNumber={METER}"
                  f"&From={first.isoformat()}&To={last.isoformat()}&Uom=kWh&Periodicity=HH")
             r = await call(session, js, "GET", "/UsageAPI/api/V1/Electric", token, 60, q)
             if r["status"] != 200:
@@ -163,7 +170,7 @@ async def main():
             except Exception as exc:
                 log(f"  {key}: parse error {exc}")
                 continue
-            cache.store("0000000000", "DEMOMETER01", key, entries)
+            cache.store(ACCOUNT, METER, key, entries)
             all_entries.extend(entries)
             log(f"  {key}: {len(entries)} records in {r['s']:.1f}s")
 
@@ -174,7 +181,7 @@ async def main():
         result = analysis.analyze(records)
         out = REPO / "data"
         out.mkdir(exist_ok=True)
-        (out / "analysis_0000000000_DEMOMETER01.json").write_text(json.dumps(result, indent=1))
+        (out / f"analysis_{ACCOUNT}_{METER}.json").write_text(json.dumps(result, indent=1))
         t = result["totals"]
         log(f"DONE: {len(all_entries)} records; best plan: {t['best']}")
         for mrow in result["months"]:
