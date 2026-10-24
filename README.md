@@ -15,6 +15,7 @@ Includes an EV / Tesla overnight-charging simulation.
 
 ## Features
 
+
 - 🔐 **Automated portal login** in a real Chromium window — the portal's own
   reCAPTCHA runs as usual, nothing to solve. Supports 2FA.
 - 📊 **Meter discovery** — accounts can hold several meters; the tool lists
